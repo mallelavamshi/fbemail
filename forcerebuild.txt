@@ -1,0 +1,21 @@
+when new changes are not being updated i the Jenkins build we want to force rebuild and deploy use this script:
+cd /var/lib/jenkins/workspace/fbemail
+
+# Check what app.py actually contains
+head -50 app.py
+
+# If it still has the old code, pull latest
+git pull origin main
+
+# Force remove old containers and images
+docker stop email-scraper
+docker rm email-scraper
+docker rmi fbemail-email-scraper:latest
+docker rmi email-scraper:latest
+
+# Rebuild from scratch
+docker-compose build --no-cache
+docker-compose up -d
+
+# Check logs
+docker logs email-scraper --follow
