@@ -1,13 +1,11 @@
-# app.py - WORKING VERSION
+# app.py
 import streamlit as st
 import pandas as pd
 import os
 from datetime import datetime
 import io
-import zipfile
-
-# Import the scraper
-from get_emails_fb11 import EmailScraper, format_phone_number
+import shutil
+from jobs import JobManager, JobStatus
 
 st.set_page_config(
     page_title="Email Scraper",
@@ -15,278 +13,190 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize session state properly
-if 'results' not in st.session_state:
-    st.session_state.results = []
+job_manager = JobManager()
 
-def process_file(file_bytes, filename, selected_sheets):
-    """Process a single Excel file - NO THREADING"""
-    file_id = f"{filename}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    
-    try:
-        # Read Excel
-        excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
-        scraper = EmailScraper()
-        all_results = []
-        
-        # Create progress placeholders
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        total_sheets = len(selected_sheets)
-        
-        for sheet_num, sheet_idx in enumerate(selected_sheets):
-            sheet_name = excel_file.sheet_names[sheet_idx]
-            status_text.info(f"📄 Processing sheet: {sheet_name}")
-            
-            df = excel_file.parse(sheet_name)
-            
-            # Check required columns
-            if 'Website' not in df.columns or 'Title' not in df.columns:
-                st.warning(f"⚠️ Sheet '{sheet_name}' missing required columns. Skipping...")
-                continue
-            
-            # Process each row
-            total_rows = len(df)
-            
-            for idx, (_, row) in enumerate(df.iterrows()):
-                # Update progress
-                overall_progress = (sheet_num + (idx + 1) / total_rows) / total_sheets
-                progress_bar.progress(overall_progress)
-                status_text.info(f"📄 {sheet_name}: Row {idx+1}/{total_rows}")
-                
-                website = row['Website']
-                company = row['Title']
-                phone = row.get('Phone Number', '')
-                formatted_phone = format_phone_number(phone)
-                
-                # Handle missing website
-                if pd.isna(website) or not website or not isinstance(website, str):
-                    all_results.append({
-                        'Company': company,
-                        'Website': 'No website',
-                        'Phone Number': formatted_phone,
-                        'Email': 'No website provided',
-                        'City': sheet_name
-                    })
-                    continue
-                
-                # Check blocked domains
-                if scraper.is_blocked_domain(website):
-                    all_results.append({
-                        'Company': company,
-                        'Website': website,
-                        'Phone Number': formatted_phone,
-                        'Email': 'Blocked domain',
-                        'City': sheet_name
-                    })
-                    continue
-                
-                # Scrape website
-                scraper.emails = set()
-                scraper.visited_urls = set()
-                
-                try:
-                    scraper.scrape_page(website, max_depth=2)
-                    
-                    if scraper.emails:
-                        for email in scraper.emails:
-                            all_results.append({
-                                'Company': company,
-                                'Website': website,
-                                'Phone Number': formatted_phone,
-                                'Email': email,
-                                'City': sheet_name
-                            })
-                    else:
-                        all_results.append({
-                            'Company': company,
-                            'Website': website,
-                            'Phone Number': formatted_phone,
-                            'Email': 'No email found',
-                            'City': sheet_name
-                        })
-                except Exception as e:
-                    all_results.append({
-                        'Company': company,
-                        'Website': website,
-                        'Phone Number': formatted_phone,
-                        'Email': f'Error: {str(e)[:50]}',
-                        'City': sheet_name
-                    })
-        
-        progress_bar.progress(1.0)
-        status_text.success("✅ Processing complete!")
-        
-        # Save results
-        if all_results:
-            results_df = pd.DataFrame(all_results)
-            output_dir = 'outputs'
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = os.path.join(output_dir, f"results_{file_id}.xlsx")
-            results_df.to_excel(output_path, index=False)
-            
-            return {
-                'status': 'success',
-                'file_id': file_id,
-                'filename': filename,
-                'output_path': output_path,
-                'total_emails': len([r for r in all_results if not r['Email'].startswith(('No', 'Error', 'Blocked'))]),
-                'total_rows': len(results_df)
-            }
-        else:
-            return {
-                'status': 'error',
-                'filename': filename,
-                'error': 'No results found'
-            }
-            
-    except Exception as e:
-        st.error(f"❌ Error processing file: {str(e)}")
-        return {
-            'status': 'error',
-            'filename': filename,
-            'error': str(e)
-        }
-
-# Main UI
 st.title("🔍 Email Scraper Application")
-st.markdown("Upload Excel files to extract email addresses from websites")
+st.markdown("Upload files, queue processing jobs, and download results - **works even after closing browser!**")
 
-# Instructions
-with st.expander("ℹ️ How to Use"):
-    st.markdown("""
-    1. Upload one or more Excel files (.xlsx or .xls)
-    2. Select which sheets to process
-    3. Click "Start Processing"
-    4. Download results when complete
+# Create tabs
+tab1, tab2, tab3, tab4 = st.tabs(["📤 Upload Files", "🎯 Queue Jobs", "📊 Job Status", "📥 Download Results"])
+
+# Tab 1: Upload Files
+with tab1:
+    st.header("Upload Excel Files")
+    st.info("📁 Files are saved on the server and can be processed later")
     
-    **Required columns in Excel:**
-    - `Website`: URL to scrape
-    - `Title`: Company name
-    - `Phone Number` (optional)
-    """)
-
-# File upload
-st.header("📤 Upload Excel Files")
-uploaded_files = st.file_uploader(
-    "Choose Excel files",
-    type=['xlsx', 'xls'],
-    accept_multiple_files=True,
-    help="Upload Excel files containing Website and Title columns"
-)
-
-if uploaded_files:
-    st.success(f"✅ {len(uploaded_files)} file(s) uploaded")
+    uploaded_files = st.file_uploader(
+        "Choose Excel files",
+        type=['xlsx', 'xls'],
+        accept_multiple_files=True,
+        help="Upload multiple files at once"
+    )
     
-    # Process files one by one
-    for uploaded_file in uploaded_files:
-        with st.expander(f"📊 {uploaded_file.name}", expanded=True):
-            try:
-                # Read file
-                file_bytes = uploaded_file.getvalue()
-                excel_file = pd.ExcelFile(io.BytesIO(file_bytes))
+    if uploaded_files:
+        if st.button("💾 Save Files to Server", type="primary"):
+            saved_count = 0
+            for uploaded_file in uploaded_files:
+                filepath = os.path.join(job_manager.uploads_dir, uploaded_file.name)
+                with open(filepath, 'wb') as f:
+                    f.write(uploaded_file.getbuffer())
+                saved_count += 1
+            st.success(f"✅ Saved {saved_count} file(s) to server!")
+            st.rerun()
+
+# Tab 2: Queue Jobs
+with tab2:
+    st.header("Select Files for Processing")
+    
+    uploaded_files = job_manager.get_uploaded_files()
+    
+    if not uploaded_files:
+        st.warning("⚠️ No files uploaded yet. Go to 'Upload Files' tab first.")
+    else:
+        st.success(f"📁 {len(uploaded_files)} file(s) available on server")
+        
+        for file_info in uploaded_files:
+            with st.expander(f"📊 {file_info['filename']} ({file_info['size'] / 1024:.1f} KB)"):
+                try:
+                    excel_file = pd.ExcelFile(file_info['filepath'])
+                    
+                    st.write(f"**Sheets:** {len(excel_file.sheet_names)}")
+                    
+                    col1, col2 = st.columns([3, 1])
+                    
+                    with col1:
+                        selected_sheets = st.multiselect(
+                            "Select sheets to process",
+                            range(len(excel_file.sheet_names)),
+                            format_func=lambda x: excel_file.sheet_names[x],
+                            default=list(range(min(3, len(excel_file.sheet_names)))),
+                            key=f"sheets_{file_info['filename']}"
+                        )
+                    
+                    with col2:
+                        if st.button("🚀 Queue Job", key=f"queue_{file_info['filename']}", use_container_width=True):
+                            if selected_sheets:
+                                job_id = job_manager.create_job(
+                                    file_info['filename'],
+                                    selected_sheets
+                                )
+                                st.success(f"✅ Job queued! ID: {job_id[:8]}...")
+                                st.rerun()
+                            else:
+                                st.error("Please select at least one sheet")
+                    
+                    # Delete file button
+                    if st.button("🗑️ Delete File", key=f"delete_{file_info['filename']}"):
+                        os.remove(file_info['filepath'])
+                        st.success("Deleted!")
+                        st.rerun()
+                        
+                except Exception as e:
+                    st.error(f"Error reading file: {str(e)}")
+
+# Tab 3: Job Status
+with tab3:
+    st.header("Processing Jobs")
+    
+    # Auto-refresh
+    if st.button("🔄 Refresh Status"):
+        st.rerun()
+    
+    all_jobs = job_manager.get_all_jobs()
+    
+    if not all_jobs:
+        st.info("No jobs yet. Queue a job from the 'Queue Jobs' tab.")
+    else:
+        # Filter by status
+        status_filter = st.multiselect(
+            "Filter by status",
+            [JobStatus.PENDING.value, JobStatus.PROCESSING.value, 
+             JobStatus.COMPLETED.value, JobStatus.FAILED.value],
+            default=[JobStatus.PENDING.value, JobStatus.PROCESSING.value]
+        )
+        
+        filtered_jobs = [j for j in all_jobs if j['status'] in status_filter]
+        
+        for job in filtered_jobs:
+            status_emoji = {
+                'pending': '⏳',
+                'processing': '🔄',
+                'completed': '✅',
+                'failed': '❌'
+            }
+            
+            emoji = status_emoji.get(job['status'], '❓')
+            
+            with st.expander(f"{emoji} {job['filename']} - {job['status'].upper()}", 
+                           expanded=job['status'] == 'processing'):
+                col1, col2, col3 = st.columns(3)
                 
-                st.write(f"**Sheets found:** {len(excel_file.sheet_names)}")
+                with col1:
+                    st.metric("Status", job['status'].upper())
+                with col2:
+                    st.metric("Progress", f"{job['progress']:.1f}%")
+                with col3:
+                    if job['status'] == 'completed':
+                        st.metric("Emails Found", job['total_emails'])
                 
-                # Sheet selection
+                if job['current_sheet']:
+                    st.info(f"📄 Processing: {job['current_sheet']}")
+                
+                st.progress(job['progress'] / 100)
+                
+                st.caption(f"Created: {job['created_at']}")
+                if job['completed_at']:
+                    st.caption(f"Completed: {job['completed_at']}")
+                if job['error']:
+                    st.error(f"Error: {job['error']}")
+
+# Tab 4: Download Results
+with tab4:
+    st.header("Download Processed Files")
+    
+    completed_jobs = [j for j in job_manager.get_all_jobs() 
+                     if j['status'] == JobStatus.COMPLETED.value]
+    
+    if not completed_jobs:
+        st.info("No completed jobs yet.")
+    else:
+        st.success(f"✅ {len(completed_jobs)} file(s) ready for download")
+        
+        # Summary
+        total_emails = sum(j['total_emails'] for j in completed_jobs)
+        st.metric("Total Emails Extracted", total_emails)
+        
+        st.divider()
+        
+        for job in completed_jobs:
+            output_path = os.path.join(job_manager.outputs_dir, job['output_file'])
+            
+            if os.path.exists(output_path):
                 col1, col2 = st.columns([3, 1])
                 
                 with col1:
-                    selected_sheets = st.multiselect(
-                        "Select sheets to process",
-                        range(len(excel_file.sheet_names)),
-                        format_func=lambda x: excel_file.sheet_names[x],
-                        default=list(range(min(3, len(excel_file.sheet_names)))),
-                        key=f"sheets_{uploaded_file.name}"
-                    )
+                    st.write(f"**{job['output_file']}**")
+                    st.caption(f"📧 {job['total_emails']} emails | 📄 {job['total_rows']} rows | ✅ {job['completed_at']}")
                 
                 with col2:
-                    process_button = st.button(
-                        "🚀 Process",
-                        key=f"process_{uploaded_file.name}",
-                        use_container_width=True,
-                        type="primary"
-                    )
-                
-                if process_button and selected_sheets:
-                    with st.spinner(f"Processing {uploaded_file.name}..."):
-                        result = process_file(file_bytes, uploaded_file.name, selected_sheets)
-                        
-                        if result['status'] == 'success':
-                            st.session_state.results.append(result)
-                            st.success(f"✅ Complete! Found {result['total_emails']} emails in {result['total_rows']} rows")
-                        else:
-                            st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
-                
-                elif process_button and not selected_sheets:
-                    st.warning("⚠️ Please select at least one sheet")
-                    
-            except Exception as e:
-                st.error(f"Error reading file: {str(e)}")
-
-# Results section
-if st.session_state.results:
-    st.divider()
-    st.header("📥 Download Results")
-    
-    # Summary
-    total_emails = sum(r['total_emails'] for r in st.session_state.results if r['status'] == 'success')
-    total_files = len([r for r in st.session_state.results if r['status'] == 'success'])
-    
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("Files Processed", total_files)
-    with col2:
-        st.metric("Total Emails Found", total_emails)
-    
-    st.divider()
-    
-    # Individual downloads
-    for result in st.session_state.results:
-        if result['status'] == 'success' and os.path.exists(result['output_path']):
-            col1, col2 = st.columns([3, 1])
-            
-            with col1:
-                st.write(f"**{result['filename']}**")
-                st.caption(f"📧 {result['total_emails']} emails | 📄 {result['total_rows']} rows")
-            
-            with col2:
-                with open(result['output_path'], 'rb') as f:
-                    st.download_button(
-                        label="⬇️ Download",
-                        data=f,
-                        file_name=f"scraped_{result['filename']}",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"download_{result['file_id']}",
-                        use_container_width=True
-                    )
-    
-    # Bulk download
-    if total_files > 1:
-        st.divider()
-        zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            for result in st.session_state.results:
-                if result['status'] == 'success' and os.path.exists(result['output_path']):
-                    zip_file.write(result['output_path'], os.path.basename(result['output_path']))
-        
-        st.download_button(
-            label="📦 Download All Results (ZIP)",
-            data=zip_buffer.getvalue(),
-            file_name=f"all_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
-            mime="application/zip",
-            use_container_width=True
-        )
-    
-    # Clear results button
-    if st.button("🗑️ Clear Results"):
-        st.session_state.results = []
-        st.rerun()
-
-else:
-    st.info("👆 Upload files and click 'Process' to begin scraping")
+                    with open(output_path, 'rb') as f:
+                        st.download_button(
+                            label="⬇️ Download",
+                            data=f,
+                            file_name=job['output_file'],
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key=f"download_{job['job_id']}",
+                            use_container_width=True
+                        )
 
 # Footer
 st.divider()
-st.caption("Made with ❤️ using Streamlit | Email Scraper v1.0")
+st.caption("💡 Background worker processes jobs continuously - safe to close browser!")
+
+# Add auto-refresh for active jobs
+active_jobs = [j for j in job_manager.get_all_jobs() 
+              if j['status'] in ['pending', 'processing']]
+if active_jobs and 'last_refresh' not in st.session_state:
+    st.session_state.last_refresh = datetime.now()
+    # Auto-refresh every 10 seconds if there are active jobs
+    st.markdown('<meta http-equiv="refresh" content="10">', unsafe_allow_html=True)
