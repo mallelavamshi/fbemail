@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class AsyncEmailScraper:
-    def __init__(self, max_concurrent=200, timeout=5):
+    def __init__(self, max_concurrent=1000, timeout=5):
         """
         max_concurrent: Number of simultaneous requests (200-500 recommended)
         timeout: Request timeout in seconds

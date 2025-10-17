@@ -114,7 +114,7 @@ async def process_job_async(job_id: str):
                 
                 logger.info(f"⚡ Scraping batch {batch_start}-{batch_end} of {len(websites_data)}")
                 
-                batch_results = await scrape_multiple_websites(batch_data, max_concurrent=200)
+                batch_results = await scrape_multiple_websites(batch_data, max_concurrent=1000)
                 all_results.extend(batch_results)
                 
                 # Update progress
