@@ -214,76 +214,80 @@ def format_phone_number(phone):
 
 async def scrape_multiple_websites(websites_data: List[dict], max_concurrent: int = 200) -> List[dict]:
     """
-    Scrape multiple websites concurrently
-    websites_data: [{'company': 'ABC', 'website': 'example.com', 'phone': '123', 'city': 'NY'}, ...]
+    Scrape multiple websites concurrently - each gets its own scraper instance
     """
-    scraper = AsyncEmailScraper(max_concurrent=max_concurrent)
     results = []
     
+    # Semaphore to control concurrency
+    semaphore = asyncio.Semaphore(max_concurrent)
+    
     async def scrape_one(data):
-        website = data['website']
-        company = data['company']
-        phone = data.get('phone', '')
-        city = data.get('city', '')
-        formatted_phone = format_phone_number(phone)
-        
-        if pd.isna(website) or not website or not isinstance(website, str):
-            return {
-                'Company': company,
-                'Website': 'No website',
-                'Phone Number': formatted_phone,
-                'Email': 'No website provided',
-                'City': city
-            }
-        
-        if scraper.is_blocked_domain(website):
-            return {
-                'Company': company,
-                'Website': website,
-                'Phone Number': formatted_phone,
-                'Email': 'Blocked domain',
-                'City': city
-            }
-        
-        try:
-            emails = await scraper.scrape_website(website, max_depth=2)
+        async with semaphore:  # Limit concurrent operations
+            website = data['website']
+            company = data['company']
+            phone = data.get('phone', '')
+            city = data.get('city', '')
+            formatted_phone = format_phone_number(phone)
             
-            if emails:
-                # Return multiple rows if multiple emails found
-                return [
-                    {
-                        'Company': company,
-                        'Website': website,
-                        'Phone Number': formatted_phone,
-                        'Email': email,
-                        'City': city
-                    }
-                    for email in emails
-                ]
-            else:
+            if pd.isna(website) or not website or not isinstance(website, str):
+                return {
+                    'Company': company,
+                    'Website': 'No website',
+                    'Phone Number': formatted_phone,
+                    'Email': 'No website provided',
+                    'City': city
+                }
+            
+            # CREATE FRESH SCRAPER FOR THIS WEBSITE ONLY
+            scraper = AsyncEmailScraper(max_concurrent=50)  # Lower concurrency per site
+            
+            if scraper.is_blocked_domain(website):
                 return {
                     'Company': company,
                     'Website': website,
                     'Phone Number': formatted_phone,
-                    'Email': 'No email found',
+                    'Email': 'Blocked domain',
                     'City': city
                 }
-        except Exception as e:
-            return {
-                'Company': company,
-                'Website': website,
-                'Phone Number': formatted_phone,
-                'Email': f'Error: {str(e)[:50]}',
-                'City': city
-            }
+            
+            try:
+                emails = await scraper.scrape_website(website, max_depth=2)
+                
+                if emails:
+                    return [
+                        {
+                            'Company': company,
+                            'Website': website,
+                            'Phone Number': formatted_phone,
+                            'Email': email,
+                            'City': city
+                        }
+                        for email in emails
+                    ]
+                else:
+                    return {
+                        'Company': company,
+                        'Website': website,
+                        'Phone Number': formatted_phone,
+                        'Email': 'No email found',
+                        'City': city
+                    }
+            except Exception as e:
+                return {
+                    'Company': company,
+                    'Website': website,
+                    'Phone Number': formatted_phone,
+                    'Email': f'Error: {str(e)[:50]}',
+                    'City': city
+                }
     
     # Create tasks for all websites
     tasks = [scrape_one(data) for data in websites_data]
     
-    # Execute with progress tracking
+    # Execute all concurrently
     completed_results = await asyncio.gather(*tasks, return_exceptions=True)
     
-    # Flatten results (some may be lists if multiple emails found)
+    # Flatten results
     for result in completed_results:
         if isinstance(result, list):
             results.extend(result)
