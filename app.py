@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 import io
 from jobs import JobManager, JobStatus, JobControl
+import time  # <--- ADD THIS LINE
 
 st.set_page_config(
     page_title="Email Scraper Pro",
