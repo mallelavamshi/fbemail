@@ -5,7 +5,7 @@ pipeline {
     environment {
         DOCKER_IMAGE = 'email-scraper'
         DOCKER_TAG = "${BUILD_NUMBER}"
-        GITHUB_REPO = 'your-username/email-scraper'
+        GITHUB_REPO = 'mallelavamshi/fbemail'
     }
     
     stages {
