@@ -1,12 +1,9 @@
-# docker-compose.yml
-version: '3.8'
-
 services:
   email-scraper:
     build: .
     container_name: email-scraper
     ports:
-      - "8501:8501"
+      - "8505:8501"  # Changed from 8501:8501 to 8505:8501
     volumes:
       - ./outputs:/app/outputs
     environment:
