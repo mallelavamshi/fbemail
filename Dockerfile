@@ -1,31 +1,35 @@
-# Dockerfile
-FROM python:3.11-slim
+version: '3.8'
 
-WORKDIR /app
+services:
+  email-scraper:
+    container_name: email-scraper
+    build: .
+    volumes:
+      - ./uploaded_files:/app/uploaded_files
+      - ./outputs:/app/outputs
+      - ./jobs:/app/jobs
+      - ./logs:/app/logs
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - email-scraper-network
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    supervisor \
-    && rm -rf /var/lib/apt/lists/*
+  nginx:
+    image: nginx:alpine
+    container_name: email-scraper-nginx
+    ports:
+      - "80:80"       # Standard HTTP port
+      - "443:443"     # Standard HTTPS port
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    depends_on:
+      - email-scraper
+    restart: unless-stopped
+    networks:
+      - email-scraper-network
 
-# Copy requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy application code
-COPY . .
-
-# Create directories
-RUN mkdir -p uploaded_files outputs jobs logs /var/log/supervisor
-
-# Copy supervisor config
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# Expose Streamlit port
-EXPOSE 8501
-
-# Run supervisor to manage both processes
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+networks:
+  email-scraper-network:
+    driver: bridge
